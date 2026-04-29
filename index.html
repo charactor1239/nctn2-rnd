@@ -6591,7 +6591,9 @@
 
     function form13BuildUpdatedItemListForCreateTask(selectedRow) {
       const currentList = form13ParseItemList(selectedRow);
-      if (!currentList.length) return [];
+      if (!currentList.length) {
+        return [{ ...(selectedRow || {}), Createtask: 'yes' }];
+      }
 
       const selectedIndex = form13ToInt(form13GetV(selectedRow, ['__item_list_index']), -1);
       if (selectedIndex >= 0 && selectedIndex < currentList.length) {
@@ -6651,6 +6653,16 @@
       formData.append('item_list', JSON.stringify(updatedItemList));
       formData.append('_ts', Date.now().toString());
 
+      console.log('[Form13] POST update webhook', {
+        endpoint: FORM13_UPDATE_ITEMLIST_WEBHOOK_URL,
+        ma_phe_duyet: formData.get('ma_phe_duyet') || '',
+        approval_code: formData.get('approval_code') || '',
+        id: formData.get('id') || '',
+        odoo_id: formData.get('odoo_id') || '',
+        created_item_slot_index: formData.get('created_item_slot_index') || '',
+        created_item_component_key: formData.get('created_item_component_key') || '',
+        item_list_size: Array.isArray(updatedItemList) ? updatedItemList.length : 0
+      });
       const resp = await fetch(FORM13_UPDATE_ITEMLIST_WEBHOOK_URL, { method: 'POST', body: formData });
       if (!resp.ok) {
         const text = await resp.text();
@@ -6791,18 +6803,19 @@
         await form13MarkCreateTaskOnWebhook(row);
         const updatedList = form13BuildUpdatedItemListForCreateTask(row);
         form13ApplyItemListToStore(row, updatedList);
-        if (typeof renderForm13Table === 'function') renderForm13Table();
+        applyForm13Filter();
+        if (typeof showToast === 'function') showToast('Đã gửi cập nhật Form 13 lên endpoint.', 'success');
       } catch (err) {
         if (typeof showToast === 'function') {
           showToast(`Không thể cập nhật Createtask trên webhook: ${String(err?.message || err)}`, 'error');
         }
+        return;
       }
       const navBtn = document.querySelector('.nav-btn[data-target="testRequest"]');
       if (navBtn) navBtn.click();
       setTimeout(() => {
         fillTestRequestFromForm13Row(row);
         if (typeof switchTrvTab === 'function') switchTrvTab('danh-gia');
-        if (typeof showToast === 'function') showToast('Đã tự điền dữ liệu từ Form 13 vào Nhập tác vụ mới.', 'success');
       }, 30);
     }
 
