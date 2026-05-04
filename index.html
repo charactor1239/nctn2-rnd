@@ -6505,11 +6505,16 @@
       if (typeof raw === 'string') {
         try {
           const parsed = JSON.parse(raw);
-          return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+          if (Array.isArray(parsed)) return parsed.filter(Boolean);
+          // Truong hop item_list chi la mot object (item_count = 1)
+          if (parsed && typeof parsed === 'object') return [parsed];
+          return [];
         } catch (_) {
           return [];
         }
       }
+      // Truong hop API tra item_list la object true (khong phai string)
+      if (typeof raw === 'object') return [raw];
       return [];
     }
 
@@ -6566,15 +6571,10 @@
       if (!Array.isArray(updatedItemList) || !updatedItemList.length) return;
       const origin = (selectedRow && selectedRow.__form13_parent_row_ref) || selectedRow;
       if (!origin || typeof origin !== 'object') return;
-      const keySet = form13GetApprovalKeys(origin);
+      // Chi cap nhat dung parent row (origin).
+      // Neu cap nhat lan sang cac dong "ung key" co the lam ghi de len item_list cua dong khac,
+      // gay hien thi sai so luong item (VD 2 item thanh 1 item).
       const toUpdate = new Set([origin]);
-      if (keySet.length && Array.isArray(FORM13_ALL_DATA)) {
-        FORM13_ALL_DATA.forEach((r) => {
-          if (r === origin) return;
-          const rk = form13GetApprovalKeys(r);
-          if (rk.some((k) => keySet.includes(k))) toUpdate.add(r);
-        });
-      }
       const useString = typeof origin.item_list === 'string'
         || (origin.item_list === undefined && typeof origin.Item_list === 'string');
       const payload = useString ? JSON.stringify(updatedItemList) : updatedItemList.map((it) => ({ ...(it || {}) }));
@@ -6590,7 +6590,9 @@
     }
 
     function form13BuildUpdatedItemListForCreateTask(selectedRow) {
-      const currentList = form13ParseItemList(selectedRow);
+      // Luon phai parse item_list tu parent row (neu co), tranh truong hop merged row bi ghi de len item_list.
+      const origin = (selectedRow && selectedRow.__form13_parent_row_ref) || selectedRow;
+      const currentList = form13ParseItemList(origin);
       if (!currentList.length) return [];
 
       const selectedIndex = form13ToInt(form13GetV(selectedRow, ['__item_list_index']), -1);
@@ -6651,11 +6653,36 @@
       formData.append('item_list', JSON.stringify(updatedItemList));
       formData.append('_ts', Date.now().toString());
 
-      const resp = await fetch(FORM13_UPDATE_ITEMLIST_WEBHOOK_URL, { method: 'POST', body: formData });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `HTTP ${resp.status}`);
+      console.log('[Form13] POST update webhook', {
+        endpoint: FORM13_UPDATE_ITEMLIST_WEBHOOK_URL,
+        ma_phe_duyet: formData.get('ma_phe_duyet') || '',
+        approval_code: formData.get('approval_code') || '',
+        id: formData.get('id') || '',
+        odoo_id: formData.get('odoo_id') || '',
+        created_item_slot_index: formData.get('created_item_slot_index') || '',
+        created_item_component_key: formData.get('created_item_component_key') || '',
+        item_list_size: Array.isArray(updatedItemList) ? updatedItemList.length : 0
+      });
+      let resp;
+      try {
+        resp = await fetch(FORM13_UPDATE_ITEMLIST_WEBHOOK_URL, { method: 'POST', body: formData, mode: 'cors' });
+      } catch (corsErr) {
+        // Fallback thuần frontend: vẫn bắn request khi môi trường chặn CORS.
+        await fetch(FORM13_UPDATE_ITEMLIST_WEBHOOK_URL, { method: 'POST', body: formData, mode: 'no-cors' });
+        console.warn('[Form13] CORS fetch failed, fallback no-cors sent', corsErr);
+        return;
       }
+      if (resp.type === 'opaque') {
+        console.warn('[Form13] webhook response is opaque (no-cors).');
+        return;
+      }
+      const respText = await resp.text();
+      console.log('[Form13] webhook response', {
+        status: resp.status,
+        ok: resp.ok,
+        body: String(respText || '').slice(0, 500)
+      });
+      if (!resp.ok) throw new Error(respText || `HTTP ${resp.status}`);
     }
 
     function form13GetRowsByApproval(row) {
@@ -6787,22 +6814,32 @@
 
     async function openCreateTaskFromForm13Row(row) {
       if (!row) return;
+      console.log('[Form13] openCreateTaskFromForm13Row:start', {
+        ma_phe_duyet: form13GetV(row, ['ma_phe_duyet', 'approval_code', 'code']) || '',
+        id: form13GetV(row, ['id', 'Id', 'ID', '_id']) || '',
+        odoo_id: form13GetV(row, ['odoo_id', 'approval_id']) || '',
+        item_count: form13GetV(row, ['item_count']) || '',
+        has_item_list: form13ParseItemList(row).length > 0
+      });
       try {
         await form13MarkCreateTaskOnWebhook(row);
+        console.log('[Form13] openCreateTaskFromForm13Row:afterWebhook');
         const updatedList = form13BuildUpdatedItemListForCreateTask(row);
         form13ApplyItemListToStore(row, updatedList);
-        if (typeof renderForm13Table === 'function') renderForm13Table();
+        applyForm13Filter();
+        if (typeof showToast === 'function') showToast('Đã gửi cập nhật Form 13 lên endpoint.', 'success');
       } catch (err) {
+        console.error('[Form13] openCreateTaskFromForm13Row:error', err);
         if (typeof showToast === 'function') {
           showToast(`Không thể cập nhật Createtask trên webhook: ${String(err?.message || err)}`, 'error');
         }
+        return;
       }
       const navBtn = document.querySelector('.nav-btn[data-target="testRequest"]');
       if (navBtn) navBtn.click();
       setTimeout(() => {
         fillTestRequestFromForm13Row(row);
         if (typeof switchTrvTab === 'function') switchTrvTab('danh-gia');
-        if (typeof showToast === 'function') showToast('Đã tự điền dữ liệu từ Form 13 vào Nhập tác vụ mới.', 'success');
       }, 30);
     }
 
@@ -6834,9 +6871,10 @@
         const isCreated = form13IsCreatedTaskItem(row);
         const rowClass = isCreated ? 'bg-yellow-100 hover:bg-yellow-200' : 'hover:bg-gray-50';
         const btnClass = isCreated
-          ? 'px-3 py-1 rounded bg-yellow-200 text-amber-800 hover:bg-yellow-300 text-xs font-medium form13-item-pick-btn'
+          ? 'px-3 py-1 rounded bg-yellow-200 text-amber-800 text-xs font-medium form13-item-pick-btn opacity-60 cursor-not-allowed'
           : 'px-3 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-medium form13-item-pick-btn';
         const btnLabel = isCreated ? 'Đã tạo' : 'Chọn item';
+        const disabledAttr = isCreated ? ' disabled' : '';
         return `<tr class="${rowClass}">
           <td class="px-3 py-2 font-medium">${form13Escape(itemLabel)}</td>
           <td class="px-3 py-2">${form13Escape(taskName)}</td>
@@ -6844,7 +6882,7 @@
           <td class="px-3 py-2">${form13Escape(maSanPham)}</td>
           <td class="px-3 py-2">${form13Escape(loaiLinhKien)}</td>
           <td class="px-3 py-2">
-            <button type="button" class="${btnClass}" data-pick-idx="${idx}">${btnLabel}</button>
+            <button type="button" class="${btnClass}" data-pick-idx="${idx}"${disabledAttr}>${btnLabel}</button>
           </td>
         </tr>`;
       }).join('');
@@ -6867,7 +6905,8 @@
       const row = FORM13_FILTERED_DATA[filteredIndex];
       if (!row) return;
       const itemsFromList = form13ParseItemList(row);
-      if (itemsFromList.length > 1) {
+      // Luon mo modal chon item neu co item_list (dù 1 hay nhiều item).
+      if (itemsFromList.length >= 1) {
         const mergedRows = itemsFromList
           .map((it, idx) => {
             const merged = form13MergeBaseWithItem(row, it);
@@ -6877,13 +6916,6 @@
           })
           .sort((a, b) => form13GetRowItemIndex(a) - form13GetRowItemIndex(b));
         openForm13ItemModal(row, mergedRows);
-        return;
-      }
-      if (itemsFromList.length === 1) {
-        const merged = form13MergeBaseWithItem(row, itemsFromList[0]);
-        merged.__item_list_index = 0;
-        merged.__form13_parent_row_ref = row;
-        await openCreateTaskFromForm13Row(merged);
         return;
       }
       const itemCount = form13ToInt(form13GetV(row, ['item_count']), 1);
@@ -6935,8 +6967,8 @@
           const listItems = form13ParseItemList(row);
           const itemCountNum = listItems.length > 0 ? listItems.length : form13ToInt(item, 1);
           const createdCountNum = listItems.filter((it) => form13IsCreatedTaskItem(it)).length;
-          const actionLabel = itemCountNum > 1 ? 'Chọn item' : 'Tạo mới';
-          const actionIcon = itemCountNum > 1 ? 'list_alt' : 'add_task';
+          const actionLabel = 'Chọn item';
+          const actionIcon = 'list_alt';
           const actionCell = `<button type="button" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-medium form13-create-task-btn" data-idx="${stt - 1}"><span class="material-icons" style="font-size:14px">${actionIcon}</span><span>${actionLabel}</span></button>`;
           const itemCell = createdCountNum > 0
             ? `<span class="inline-flex items-center px-2 py-1 rounded bg-yellow-100 text-amber-800 font-medium">${form13Escape(item) || itemCountNum} <span class="ml-1 text-xs">(đã tạo ${createdCountNum})</span></span>`
